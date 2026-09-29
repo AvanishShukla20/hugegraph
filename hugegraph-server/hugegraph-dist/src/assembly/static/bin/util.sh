@@ -655,6 +655,6 @@ function kill_process_and_wait() {
 }
 
 function exit_with_usage_help(){
-    echo "USAGE: $0 [-d true|false] [-g g1] [-m true|false] [-p true|false] [-s true|false] [-j java_options] [-t timeout] [-y true|false]"
+    echo "USAGE: $0 [-c conf_dir] [-d true|false] [-g g1] [-i pid_file] [-l logs_dir] [-m true|false] [-p true|false] [-s true|false] [-j java_options] [-t timeout] [-y true|false]"
     exit 1
 }
