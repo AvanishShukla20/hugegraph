@@ -115,11 +115,11 @@ while getopts "d:c:g:i:j:l:o:y:" arg; do
     esac
 done
 
-# Canonicalize relative path overrides to absolute paths
-CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE")"
-LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")"
-PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")"
-PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")"
+# Canonicalize relative path overrides to absolute paths.
+CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE")" || exit 1
+LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")" || exit 1
+PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")" || exit 1
+PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")" || exit 1
 
 CONF="${CONF_OVERRIDE:-$TOP/conf}"
 LOGS="${LOGS_OVERRIDE:-$TOP/logs}"
@@ -129,6 +129,7 @@ PID_FILE="${PID_FILE_OVERRIDE:-$BIN/pid}"
 
 ensure_path_writable "$LOGS"
 ensure_path_writable "$PLUGINS"
+ensure_path_writable "$(dirname "$PID_FILE")"
 
 # The maximum and minimum heap memory that service can use (for production env set it 36GB)
 MAX_MEM=$((2 * 1024))
@@ -151,7 +152,7 @@ JAVA_VERSION=$($JAVA -version 2>&1 |
                sed 's/^1\.//' | cut -d'.' -f1)
 JAVA_VERSION="${JAVA_VERSION%%[!0-9]*}"
 if [[ -z $JAVA_VERSION || $JAVA_VERSION -lt $EXPECT_JDK_VERSION ]]; then
-    echo "Please make sure that the JDK is installed and the version >= $EXPECT_JDK_VERSION"  >> ${OUTPUT}
+    echo "Please make sure that the JDK is installed and the version >= $EXPECT_JDK_VERSION"  >> "${OUTPUT}"
     exit 1
 fi
 
@@ -160,14 +161,14 @@ if [ "$JAVA_OPTIONS" = "" ]; then
     XMX=$(calc_xmx $MIN_MEM $MAX_MEM)
     if [ $? -ne 0 ]; then
         echo "Failed to start HugeGraphStoreServer, requires at least ${MIN_MEM}m free memory" \
-             >> ${OUTPUT}
+             >> "${OUTPUT}"
         exit 1
     fi
      JAVA_OPTIONS="-Xms${MIN_MEM}m -Xmx${XMX}m -XX:MetaspaceSize=256M -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${LOGS} ${USER_OPTION} "
     # JAVA_OPTIONS="-Xms${MIN_MEM}m -Xmx${XMX}m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${LOGS} ${USER_OPTION}"
 
     # Rolling out detailed GC logs
-   JAVA_OPTIONS="${JAVA_OPTIONS} -Xlog:gc=info:file=${LOGS}/logs/gc.log:time,uptime,level,tags:filecount=3,filesize=100m"
+    JAVA_OPTIONS="${JAVA_OPTIONS} -Xlog:gc=info:file=${LOGS}/gc.log:time,uptime,level,tags:filecount=3,filesize=100m"
 fi
 
 # Using G1GC as the default garbage collector (Recommended for large memory machines)
@@ -185,7 +186,7 @@ case "$GC_OPTION" in
                                       -XX:+UnlockDiagnosticVMOptions -XX:-ZProactive"
         ;;
     *)
-        echo "Unrecognized gc option: '$GC_OPTION', default use g1, options only support 'ZGC' now" >> ${OUTPUT}
+        echo "Unrecognized gc option: '$GC_OPTION', default use g1, options only support 'ZGC' now" >> "${OUTPUT}"
         exit 1
 esac
 
@@ -201,7 +202,7 @@ if [ "${OPEN_TELEMETRY}" == "true" ]; then
             "${GITHUB}/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.1.0/${OT_JAR}"
 
         if [[ ! -e "${OT_JAR_PATH}" ]]; then
-            echo "## Error: Failed to download ${OT_JAR}." >>${OUTPUT}
+            echo "## Error: Failed to download ${OT_JAR}." >>"${OUTPUT}"
             exit 1
         fi
     fi
@@ -211,8 +212,8 @@ if [ "${OPEN_TELEMETRY}" == "true" ]; then
     actual_md5=$(md5sum "${OT_JAR_PATH}" | awk '{print $1}')
 
     if [[ "${expected_md5}" != "${actual_md5}" ]]; then
-        echo "## Error: MD5 checksum verification failed for ${OT_JAR_PATH}." >>${OUTPUT}
-        echo "## Tips: Remove the file and try again." >>${OUTPUT}
+        echo "## Error: MD5 checksum verification failed for ${OT_JAR_PATH}." >>"${OUTPUT}"
+        echo "## Tips: Remove the file and try again." >>"${OUTPUT}"
         exit 1
     fi
 
@@ -245,12 +246,12 @@ if [[ $DAEMON == "true" ]]; then
     echo "Starting HugeGraphStoreServer in daemon mode..."
     if [[ "${STDOUT_MODE:-false}" == "true" ]]; then
         exec ${JAVA} -Dname="HugeGraphStore" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml \
+            -Dspring.config.location="${CONF}"/application.yml \
             ${LIB}/hg-store-node-*.jar &
     else
         exec ${JAVA} -Dname="HugeGraphStore" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml \
-            ${LIB}/hg-store-node-*.jar >> ${OUTPUT} 2>&1 &
+            -Dspring.config.location="${CONF}"/application.yml \
+            ${LIB}/hg-store-node-*.jar >> "${OUTPUT}" 2>&1 &
     fi
     PID="$!"
     # Write pid to file
@@ -263,11 +264,11 @@ else
     echo "[+pid] $$"
     if [[ "${STDOUT_MODE:-false}" == "true" ]]; then
         exec ${JAVA} -Dname="HugeGraphStore" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml \
+            -Dspring.config.location="${CONF}"/application.yml \
             ${LIB}/hg-store-node-*.jar
     else
         exec ${JAVA} -Dname="HugeGraphStore" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml \
-            ${LIB}/hg-store-node-*.jar >> ${OUTPUT} 2>&1
+            -Dspring.config.location="${CONF}"/application.yml \
+            ${LIB}/hg-store-node-*.jar >> "${OUTPUT}" 2>&1
     fi
 fi

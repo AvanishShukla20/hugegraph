@@ -46,14 +46,18 @@ SCRIPTS="$TOP/scripts"
 # Note: keep ':' in the end of the string to indicate the option needs a value
 while getopts "c:d:g:i:j:l:m:o:p:s:t:y:" arg; do
      case ${arg} in
-         c) CONF_OVERRIDE="$OPTARG" ;;
+         c) reject_unsafe_path "$OPTARG" "-c conf dir" crlf || exit 1
+            CONF_OVERRIDE="$OPTARG" ;;
          d) DAEMON="$OPTARG" ;;
          g) GC_OPTION="$OPTARG" ;;
-         i) PID_FILE_OVERRIDE="$OPTARG" ;;
+         i) reject_unsafe_path "$OPTARG" "-i pid file" crlf || exit 1
+            PID_FILE_OVERRIDE="$OPTARG" ;;
          j) USER_OPTION="$OPTARG" ;;
-         l) LOGS_OVERRIDE="$OPTARG" ;;
+         l) reject_unsafe_path "$OPTARG" "-l logs dir" crlf || exit 1
+            LOGS_OVERRIDE="$OPTARG" ;;
          m) OPEN_MONITOR="$OPTARG" ;;
-         o) PLUGINS_OVERRIDE="$OPTARG" ;;
+         o) reject_unsafe_path "$OPTARG" "-o plugins dir" crlf || exit 1
+            PLUGINS_OVERRIDE="$OPTARG" ;;
          p) PRELOAD="$OPTARG" ;;
          s) OPEN_SECURITY_CHECK="$OPTARG" ;;
          t) SERVER_STARTUP_TIMEOUT_S="$OPTARG" ;;
@@ -64,16 +68,28 @@ while getopts "c:d:g:i:j:l:m:o:p:s:t:y:" arg; do
      esac
 done
 
-# Canonicalize relative path overrides to absolute paths
-CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE")"
-LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")"
-PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")"
-PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")"
+# Canonicalize relative path overrides to absolute paths.
+CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE")" || exit 1
+LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")" || exit 1
+PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")" || exit 1
+PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")" || exit 1
+
+# The monitor persists these values into a crontab line, where '%' is special to cron
+if [ "$OPEN_MONITOR" == "true" ]; then
+    reject_unsafe_path "$CONF_OVERRIDE" "conf dir (-c)" cron || exit 1
+    reject_unsafe_path "$LOGS_OVERRIDE" "logs dir (-l)" cron || exit 1
+    reject_unsafe_path "$PLUGINS_OVERRIDE" "plugins dir (-o)" cron || exit 1
+    reject_unsafe_path "$PID_FILE_OVERRIDE" "pid file (-i)" cron || exit 1
+    reject_unsafe_path "$JAVA_HOME" "JAVA_HOME" cron || exit 1
+    reject_unsafe_path "$TOP" "install directory" cron || exit 1
+fi
 
 CONF="${CONF_OVERRIDE:-$TOP/conf}"
 LOGS="${LOGS_OVERRIDE:-$TOP/logs}"
 PID_FILE="${PID_FILE_OVERRIDE:-$BIN/pid}"
 PLUGINS="${PLUGINS_OVERRIDE:-$TOP/plugins}"
+
+ensure_path_writable "$(dirname "$PID_FILE")"
 
 export CONF_OVERRIDE LOGS_OVERRIDE PID_FILE_OVERRIDE PLUGINS_OVERRIDE
 

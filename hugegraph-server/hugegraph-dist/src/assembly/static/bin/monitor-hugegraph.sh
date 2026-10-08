@@ -25,10 +25,10 @@ function abs_path() {
     echo "$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 }
 
-BIN=`abs_path`
-TOP="$(cd $BIN/../ && pwd)"
+BIN="$(abs_path)"
+TOP="$(cd "$BIN"/../ && pwd)"
 
-. $BIN/util.sh
+. "$BIN"/util.sh
 
 CONF="${CONF_OVERRIDE:-$TOP/conf}"
 LOGS="${LOGS_OVERRIDE:-$TOP/logs}"
@@ -40,23 +40,23 @@ PROC_NAME="HugeGraphServer"
 LOG_DIR="$LOGS"
 MONITOR_LOG="$LOG_DIR/monitor.log"
 
-if [ ! -d $LOG_DIR ]; then
-    mkdir -p $LOG_DIR
+if [ ! -d "$LOG_DIR" ]; then
+    mkdir -p "$LOG_DIR"
 fi
 
 function record_monitor_log() {
-    echo `date '+%Y-%m-%d %H:%M:%S'`, $1 >> $MONITOR_LOG
+    echo `date '+%Y-%m-%d %H:%M:%S'`, $1 >> "$MONITOR_LOG"
 }
 
 function restart_server() {
     local stop_old=$1
     if [ "$stop_old" == "true" ]; then
         # Don't remove monitor; stop the pid file the caller used.
-        $BIN/stop-hugegraph.sh ${PID_FILE_OVERRIDE:+-i "$PID_FILE_OVERRIDE"} false
+        "$BIN"/stop-hugegraph.sh ${PID_FILE_OVERRIDE:+-i "$PID_FILE_OVERRIDE"} false
     fi
     record_monitor_log "Ready to restart $PROC_NAME"
     # Don't add monitor again, but restart with path overrides
-    $BIN/start-hugegraph.sh -m false \
+    "$BIN"/start-hugegraph.sh -m false \
         ${CONF_OVERRIDE:+-c "$CONF_OVERRIDE"} \
         ${LOGS_OVERRIDE:+-l "$LOGS_OVERRIDE"} \
         ${PLUGINS_OVERRIDE:+-o "$PLUGINS_OVERRIDE"} \

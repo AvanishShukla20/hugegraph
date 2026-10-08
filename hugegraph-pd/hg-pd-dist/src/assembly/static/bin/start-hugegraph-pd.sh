@@ -60,11 +60,11 @@ TOP="$(cd "$BIN"/../ && pwd)"
 
 . "$BIN"/util.sh
 
-# Canonicalize relative path overrides to absolute paths
-CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE")"
-LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")"
-PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")"
-PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")"
+# Canonicalize relative path overrides to absolute paths.
+CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE")" || exit 1
+LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")" || exit 1
+PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")" || exit 1
+PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")" || exit 1
 
 CONF="${CONF_OVERRIDE:-$TOP/conf}"
 LIB="$TOP/lib"
@@ -76,6 +76,7 @@ PID_FILE="${PID_FILE_OVERRIDE:-$BIN/pid}"
 
 ensure_path_writable "$LOGS"
 ensure_path_writable "$PLUGINS"
+ensure_path_writable "$(dirname "$PID_FILE")"
 
 # The maximum and minimum heap memory that service can use
 MAX_MEM=$((32 * 1024))
@@ -98,7 +99,7 @@ JAVA_VERSION=$($JAVA -version 2>&1 |
                sed 's/^1\.//' | cut -d'.' -f1)
 JAVA_VERSION="${JAVA_VERSION%%[!0-9]*}"
 if [[ -z $JAVA_VERSION || $JAVA_VERSION -lt $EXPECT_JDK_VERSION ]]; then
-    echo "Please make sure that the JDK is installed and the version >= $EXPECT_JDK_VERSION"  >> ${OUTPUT}
+    echo "Please make sure that the JDK is installed and the version >= $EXPECT_JDK_VERSION"  >> "${OUTPUT}"
     exit 1
 fi
 
@@ -107,7 +108,7 @@ if [ "$JAVA_OPTIONS" = "" ]; then
     XMX=$(calc_xmx $MIN_MEM $MAX_MEM)
     if [ $? -ne 0 ]; then
         echo "Failed to start HugeGraphPDServer, requires at least ${MIN_MEM}m free memory" \
-             >> ${OUTPUT}
+             >> "${OUTPUT}"
         exit 1
     fi
     JAVA_OPTIONS="-Xms${MIN_MEM}m -Xmx${XMX}m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${LOGS} ${USER_OPTION}"
@@ -132,7 +133,7 @@ case "$GC_OPTION" in
                                       -XX:+UnlockDiagnosticVMOptions -XX:-ZProactive"
         ;;
     *)
-        echo "Unrecognized gc option: '$GC_OPTION', default use g1, options only support 'ZGC' now" >> ${OUTPUT}
+        echo "Unrecognized gc option: '$GC_OPTION', default use g1, options only support 'ZGC' now" >> "${OUTPUT}"
         exit 1
 esac
 
@@ -146,7 +147,7 @@ if [ "${OPEN_TELEMETRY}" == "true" ]; then
             "${GITHUB}/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.1.0/${OT_JAR}"
 
         if [[ ! -e "${OT_JAR_PATH}" ]]; then
-            echo "## Error: Failed to download ${OT_JAR}." >>${OUTPUT}
+            echo "## Error: Failed to download ${OT_JAR}." >>"${OUTPUT}"
             exit 1
         fi
     fi
@@ -156,8 +157,8 @@ if [ "${OPEN_TELEMETRY}" == "true" ]; then
     actual_md5=$(md5sum "${OT_JAR_PATH}" | awk '{print $1}')
 
     if [[ "${expected_md5}" != "${actual_md5}" ]]; then
-        echo "## Error: MD5 checksum verification failed for ${OT_JAR_PATH}." >>${OUTPUT}
-        echo "## Tips: Remove the file and try again." >>${OUTPUT}
+        echo "## Error: MD5 checksum verification failed for ${OT_JAR_PATH}." >>"${OUTPUT}"
+        echo "## Tips: Remove the file and try again." >>"${OUTPUT}"
         exit 1
     fi
 
@@ -177,7 +178,7 @@ fi
 #if [ "${JMX_EXPORT_PORT}" != "" ] && [ ${JMX_EXPORT_PORT} -ne 0 ] ; then
 #  JAVA_OPTIONS="${JAVA_OPTIONS} -javaagent:${LIB}/jmx_prometheus_javaagent-0.16.1.jar=${JMX_EXPORT_PORT}:${CONF}/jmx_exporter.yml"
 #fi
-if [ $(ps -ef|grep -v grep| grep java|grep -cE ${CONF}) -ne 0 ]; then
+if [ "$(ps -ef | grep -v grep | grep java | grep -cE "${CONF}")" -ne 0 ]; then
    echo "HugeGraphPDServer is already running..."
    exit 0
 fi
@@ -189,10 +190,10 @@ if [[ $DAEMON == "true" ]]; then
     echo "Starting HugeGraphPDServer in daemon mode..."
     if [[ "${STDOUT_MODE:-false}" == "true" ]]; then
         exec ${JAVA} -Dname="HugeGraphPD" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml ${LIB}/hg-pd-service-*.jar &
+            -Dspring.config.location="${CONF}"/application.yml ${LIB}/hg-pd-service-*.jar &
     else
         exec ${JAVA} -Dname="HugeGraphPD" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml ${LIB}/hg-pd-service-*.jar >> ${OUTPUT} 2>&1 &
+            -Dspring.config.location="${CONF}"/application.yml ${LIB}/hg-pd-service-*.jar >> "${OUTPUT}" 2>&1 &
     fi
     PID="$!"
     # Write pid to file
@@ -205,9 +206,9 @@ else
     echo "[+pid] $$"
     if [[ "${STDOUT_MODE:-false}" == "true" ]]; then
         exec ${JAVA} -Dname="HugeGraphPD" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml ${LIB}/hg-pd-service-*.jar
+            -Dspring.config.location="${CONF}"/application.yml ${LIB}/hg-pd-service-*.jar
     else
         exec ${JAVA} -Dname="HugeGraphPD" ${JVM_OPTIONS} ${JAVA_OPTIONS} -jar \
-            -Dspring.config.location=${CONF}/application.yml ${LIB}/hg-pd-service-*.jar >> ${OUTPUT} 2>&1
+            -Dspring.config.location="${CONF}"/application.yml ${LIB}/hg-pd-service-*.jar >> "${OUTPUT}" 2>&1
     fi
 fi

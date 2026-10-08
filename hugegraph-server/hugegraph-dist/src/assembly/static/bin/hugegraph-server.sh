@@ -81,7 +81,7 @@ CP="$CP":$(find -L $LIB -name '*.jar' \
 # Add the jars in ext (at any subdirectory depth)
 CP="$CP":$(find -L $EXT -name '*.jar' | sort | tr '\n' ':')
 # Add the jars in plugins (at any subdirectory depth), check "javaagent" related jars carefully
-CP="$CP":$(find -L $PLUGINS -name '*.jar' | sort | tr '\n' ':')
+CP="$CP":$(find -L "$PLUGINS" -name '*.jar' | sort | tr '\n' ':')
 
 # (Cygwin only) Use ; classpath separator and reformat paths for Windows ("C:\foo")
 [[ $(uname) = CYGWIN* ]] && CP="$(cygpath -p -w "$CP")"
@@ -221,17 +221,18 @@ if [ "${OPEN_TELEMETRY}" == "true" ]; then
             "${GITHUB}/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.1.0/${OT_JAR}"
 
         if [[ ! -e "${OT_JAR_PATH}" ]]; then
-            echo "## Error: Failed to download ${OT_JAR}." >>${OUTPUT}
+            echo "## Error: Failed to download ${OT_JAR}." >>"${OUTPUT}"
             exit 1
         fi
     fi
 
+    # Note: remember update it if we change the jar
     expected_md5="e3bcbbe8ed9b6d840fa4c333b36f369f"
     actual_md5=$(md5sum "${OT_JAR_PATH}" | awk '{print $1}')
 
     if [[ "${expected_md5}" != "${actual_md5}" ]]; then
-        echo "## Error: MD5 checksum verification failed for ${OT_JAR_PATH}." >>${OUTPUT}
-        echo "## Tips: Remove the file and try again." >>${OUTPUT}
+        echo "## Error: MD5 checksum verification failed for ${OT_JAR_PATH}." >>"${OUTPUT}"
+        echo "## Tips: Remove the file and try again." >>"${OUTPUT}"
         exit 1
     fi
 
@@ -267,5 +268,5 @@ else
         ${SECURITY_MANAGER_OPTION} -cp ${CLASSPATH}: \
         org.apache.hugegraph.bootstrap.HugeGraphServerBootstrap \
         ${OPEN_SECURITY_CHECK} ${GREMLIN_SERVER_CONF} ${REST_SERVER_CONF} \
-        >> ${LOGS}/hugegraph-server-stdout.log 2>&1
+        >> "${LOGS}/hugegraph-server-stdout.log" 2>&1
 fi
