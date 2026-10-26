@@ -59,10 +59,27 @@ mkdir -p "$STUB_DIR"
 cat > "$STUB_DIR/crontab" <<EOF
 #!/bin/sh
 case "\$1" in
-    -l) [ -f "$CRON_FILE" ] && cat "$CRON_FILE"; exit 0 ;;
+    -l)
+        # Supports CRON_STUB_FAIL_READ_AT=N: the Nth '-l' call in this process
+        # fails (prints nothing, exits 1), simulating a transient read error
+        # either on the initial read or on crontab_remove's post-write verify.
+        c=0
+        [ -f "$TMP/cron-read-count" ] && c=\$(cat "$TMP/cron-read-count")
+        c=\$((c + 1))
+        echo "\$c" > "$TMP/cron-read-count"
+        if [ -n "\${CRON_STUB_FAIL_READ_AT:-}" ] && [ "\$c" -eq "\$CRON_STUB_FAIL_READ_AT" ]; then
+            echo "mocked read failure" >&2
+            exit 1
+        fi
+        [ -f "$CRON_FILE" ] && cat "$CRON_FILE"; exit 0 ;;
+    -r) rm -f "$CRON_FILE"; exit 0 ;;
     # Buffer all of stdin first, then replace: the real crontab does not truncate
     # the table while the producer (crontab -l) is still reading it.
-    -)  cat > "$CRON_FILE.new" && mv "$CRON_FILE.new" "$CRON_FILE"; exit 0 ;;
+    # CRON_STUB_FAIL_WRITE=1 simulates the install itself failing.
+    -)  [ -n "\${CRON_STUB_FAIL_WRITE:-}" ] && exit 1
+        cat > "$CRON_FILE.new" && mv "$CRON_FILE.new" "$CRON_FILE"; exit 0 ;;
+    --) shift; [ -n "\${CRON_STUB_FAIL_WRITE:-}" ] && exit 1
+        cp "\$1" "$CRON_FILE"; exit 0 ;;
 esac
 exit 1
 EOF
@@ -245,7 +262,7 @@ $res"; fi
 done
 
 # ---------------------------------------------------------------------------
-echo "== E. crontab_append / crontab_remove (stubbed crontab) =="
+echo "== E1. crontab_append / crontab_remove (stubbed crontab) =="
 
 printf '%s\n' "# existing entry" "0 3 * * * /usr/bin/backup" > "$CRON_FILE"
 BEFORE="$(cat "$CRON_FILE")"
@@ -289,7 +306,120 @@ crontab_append '-n \t \\ literal'; rc=$?
 [ $rc -ne 0 ] && ok "duplicate detection works for a job starting with '-'" || bad "leading '-' broke grep"
 
 # ---------------------------------------------------------------------------
-echo "== F. rejected input never changes the existing crontab =="
+echo "== E2. crontab_remove 3-way return code (0/1/2) =="
+
+# rc=1: the very first read fails, so no write is ever attempted; the table
+# must be left exactly as it was.
+printf '%s\n' "# untouched" > "$CRON_FILE"
+rm -f "$TMP/cron-read-count"
+CRON_STUB_FAIL_READ_AT=1 crontab_remove "anykey"; rc=$?
+[ $rc -eq 1 ] && [ "$(cat "$CRON_FILE")" = "# untouched" ] \
+    && ok "rc=1: initial read failure leaves the table untouched" \
+    || bad "rc=1 initial-read case (rc=$rc): $(cat "$CRON_FILE")"
+
+# rc=2: the install itself fails. A write was attempted, so the function must
+# report "unconfirmed" (2), not "untouched" (1), even though this stub happens
+# to leave the file alone when the simulated install fails.
+E2_KEY="e2-job-$$"
+printf '%s\n' "# keep" "*/1 * * * * $E2_KEY" > "$CRON_FILE"
+rm -f "$TMP/cron-read-count"
+CRON_STUB_FAIL_WRITE=1 crontab_remove "$E2_KEY"; rc=$?
+[ $rc -eq 2 ] && ok "rc=2: install failure is reported as unconfirmed" \
+    || bad "rc=2 install-failure case (rc=$rc)"
+
+# rc=2: the install succeeds (job IS removed) but the post-write verify read
+# fails. The function must not claim rc=0/1 here since it cannot confirm
+# anything - but the removal must still have gone through underneath.
+printf '%s\n' "# keep" "*/1 * * * * $E2_KEY" > "$CRON_FILE"
+rm -f "$TMP/cron-read-count"
+CRON_STUB_FAIL_READ_AT=2 crontab_remove "$E2_KEY"; rc=$?
+[ $rc -eq 2 ] && ok "rc=2: verify-read failure after a successful write is reported as unconfirmed" \
+    || bad "rc=2 verify-read-failure case (rc=$rc)"
+grep -qF -- "$E2_KEY" "$CRON_FILE" \
+    && bad "rc=2 verify-read-failure: the job was not actually removed" \
+    || ok "rc=2 verify-read-failure: the job was removed despite the unconfirmed return code"
+
+# rc=0 sanity: the ordinary success path (no induced failures) still returns 0.
+printf '%s\n' "# keep" "*/1 * * * * $E2_KEY" > "$CRON_FILE"
+rm -f "$TMP/cron-read-count"
+crontab_remove "$E2_KEY"; rc=$?
+[ $rc -eq 0 ] && ok "rc=0: ordinary remove still succeeds" || bad "rc=0 sanity (rc=$rc)"
+: > "$CRON_FILE"
+
+# ---------------------------------------------------------------------------
+echo "== F. legacy unquoted monitor line vs. current quoted form =="
+
+# Older start-monitor.sh versions wrote the bare, unquoted path as the whole
+# job's last word: "... && $TOP/bin/monitor-hugegraph.sh". Current start-/
+# stop-monitor.sh pass both the quoted and unquoted forms as dedup/removal
+# keys, so an in-place upgrade still recognizes and can remove that old line.
+G_TOP="$TMP/legacy-top"; mkdir -p "$G_TOP/bin"
+G_RAW="$G_TOP/bin/monitor-hugegraph.sh"
+G_Q="$(shell_quote "$G_RAW")"
+LEGACY_LINE="*/1 * * * * export JAVA_HOME=/usr/lib/jvm/jdk-17 && $G_RAW"
+
+printf '%s\n' "# keep me" "$LEGACY_LINE" > "$CRON_FILE"
+G_SNAP_COUNT="$(wc -l < "$CRON_FILE")"
+
+# A fresh install with different exported vars (e.g. CONF_OVERRIDE newly set)
+# builds a different full line, but keying on $G_Q/$G_RAW must still detect
+# the legacy line as the "same" job and refuse to add a second one.
+NEW_LINE="*/1 * * * * export JAVA_HOME=/usr/lib/jvm/jdk-17 && export CONF_OVERRIDE='/data/conf' && $G_Q"
+crontab_append "$NEW_LINE" "$G_Q" "$G_RAW"; rc=$?
+[ $rc -ne 0 ] && ok "append detects the legacy unquoted line as a duplicate" \
+    || bad "append did not detect the legacy line (rc=$rc)"
+[ "$(wc -l < "$CRON_FILE")" -eq "$G_SNAP_COUNT" ] && ok "no second job was installed alongside the legacy one" \
+    || bad "a second job was installed: $(cat "$CRON_FILE")"
+
+# Removing with both keys must delete the legacy (unquoted) line.
+crontab_remove "$G_Q" "$G_RAW"; rc=$?
+[ $rc -eq 0 ] && ok "remove succeeds with quoted+unquoted keys" || bad "remove rc=$rc"
+grep -qF -- "$G_RAW" "$CRON_FILE" && bad "legacy unquoted line still present after remove" \
+    || ok "legacy unquoted line was removed"
+grep -qF -- "# keep me" "$CRON_FILE" && ok "unrelated crontab lines untouched" || bad "unrelated line lost"
+
+# Removing with ONLY the quoted key must NOT match the legacy unquoted line
+# (this is the bug the fix addresses): confirms the old behavior would have
+# left the stale entry in place.
+printf '%s\n' "$LEGACY_LINE" > "$CRON_FILE"
+crontab_remove "$G_Q"; rc=$?
+[ $rc -eq 0 ] && grep -qF -- "$G_RAW" "$CRON_FILE" \
+    && ok "quoted-only key leaves the legacy unquoted line (demonstrates the gap)" \
+    || bad "quoted-only key unexpectedly removed/altered the legacy line"
+
+# ---- real scripts: start-monitor.sh must not duplicate, stop-monitor.sh must remove ----
+SM="$(cd "$(dirname "$UTIL")" && pwd)/start-monitor.sh"
+STOPM="$(cd "$(dirname "$UTIL")" && pwd)/stop-monitor.sh"
+if [ -f "$SM" ] && [ -f "$STOPM" ]; then
+    RTOP="$TMP/real-top-$CURRENT_MODULE"; mkdir -p "$RTOP/bin"
+    # Resolve symlinks now (e.g. macOS /var -> /private/var): start-monitor.sh's
+    # abs_path() uses `cd -P`, so TOP inside the script is the physical path.
+    # Keeping $RTOP logical here would make our expected key never match the
+    # one the script actually serializes.
+    RTOP="$(cd -P "$RTOP" && pwd)"
+    cp "$SM" "$STOPM" "$UTIL" "$RTOP/bin/"
+    cat > "$RTOP/bin/monitor-hugegraph.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$RTOP/bin/monitor-hugegraph.sh"
+    LEGACY_REAL="*/1 * * * * export JAVA_HOME=/usr && $RTOP/bin/monitor-hugegraph.sh"
+    printf '%s\n' "$LEGACY_REAL" > "$CRON_FILE"
+
+    JAVA_HOME=/usr bash "$RTOP/bin/start-monitor.sh" >/dev/null 2>&1
+    [ "$(wc -l < "$CRON_FILE")" -eq 1 ] \
+        && ok "start-monitor.sh does not duplicate an existing legacy-format job" \
+        || bad "start-monitor.sh duplicated the job: $(cat "$CRON_FILE")"
+
+    bash "$RTOP/bin/stop-monitor.sh" >/dev/null 2>&1
+    grep -qF -- "$RTOP/bin/monitor-hugegraph.sh" "$CRON_FILE" \
+        && bad "stop-monitor.sh left the legacy-format job in the crontab" \
+        || ok "stop-monitor.sh removes a legacy-format job on upgrade"
+fi
+: > "$CRON_FILE"
+
+# ---------------------------------------------------------------------------
+echo "== G. rejected input never changes the existing crontab =="
 
 printf '%s\n' "# keep me" "5 5 * * * /bin/true" > "$CRON_FILE"
 SNAP="$(cat "$CRON_FILE")"

@@ -70,16 +70,50 @@ public class PdConfigureListener implements
 
     private static String resolveConfigFilePath() {
         String springConfigLocation = System.getProperty("spring.config.location");
+        String fileSeparator = System.getProperty("file.separator");
         if (!StringUtils.isEmpty(springConfigLocation)) {
-            File appYml = new File(springConfigLocation);
-            File confDir = appYml.getParentFile();
-            if (confDir != null) {
-                return new File(confDir, PD_CONFIG_FILE_NAME).getPath();
+            // 'spring.config.location' may be a comma-separated list of
+            // locations; only use it when there is exactly one, otherwise
+            // which one applies is ambiguous and we fall back below.
+            if (!springConfigLocation.contains(",")) {
+                String location = springConfigLocation.trim();
+                // Strip the 'optional:' prefix, which just marks a missing
+                // location as non-fatal and is not part of the path.
+                if (location.startsWith("optional:")) {
+                    location = location.substring("optional:".length());
+                }
+                // Only the 'file:' scheme maps to a filesystem path we can
+                // derive a sibling file from; 'classpath:' (and any other
+                // scheme) is not something we can resolve to a writable
+                // directory, so leave it for the fallback below.
+                if (location.startsWith("file:")) {
+                    location = location.substring("file:".length());
+                } else if (location.contains(":") &&
+                           !(location.length() > 1 && location.charAt(1) == ':')) {
+                    // An unrecognized scheme (e.g. 'classpath:'), not a
+                    // Windows drive letter path such as 'C:\...'.
+                    location = null;
+                }
+                if (location != null) {
+                    File confDir;
+                    // A location ending in a path separator names the conf
+                    // directory itself (Spring looks for application.yml
+                    // inside it), not a file whose parent is the conf dir.
+                    if (location.endsWith("/") || location.endsWith(fileSeparator)) {
+                        confDir = new File(location);
+                    } else {
+                        confDir = new File(location).getParentFile();
+                    }
+                    if (confDir != null) {
+                        return new File(confDir, PD_CONFIG_FILE_NAME).getPath();
+                    }
+                }
             }
         }
-        // Fallback for contexts where spring.config.location is not set: preserve the historical $TOP/conf location.
+        // Fallback for contexts where spring.config.location is not set, or
+        // is in a form we don't resolve (classpath:, a directory list, etc.):
+        // preserve the historical $TOP/conf location.
         String workDir = System.getProperty("user.dir");
-        String fileSeparator = System.getProperty("file.separator");
         return workDir + fileSeparator + "conf" + fileSeparator + PD_CONFIG_FILE_NAME;
     }
     private ConfigurableApplicationContext context;

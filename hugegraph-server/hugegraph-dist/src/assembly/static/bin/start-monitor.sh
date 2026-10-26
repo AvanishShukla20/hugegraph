@@ -42,7 +42,8 @@ fi
 # Every value goes through cron_quote: it validates (CR/LF, '%') and emits ONE complete
 # POSIX shell word.
 JAVA_HOME_Q="$(cron_quote "$JAVA_HOME" "JAVA_HOME")" || exit 1
-MONITOR_Q="$(cron_quote "$TOP/bin/monitor-hugegraph.sh" "monitor script path")" || exit 1
+MONITOR_RAW="$TOP/bin/monitor-hugegraph.sh"
+MONITOR_Q="$(cron_quote "$MONITOR_RAW" "monitor script path")" || exit 1
 
 CRONTAB_JOB="*/1 * * * * export JAVA_HOME=$JAVA_HOME_Q &&"
 if [ -n "$CONF_OVERRIDE" ]; then
@@ -63,4 +64,8 @@ if [ -n "$PLUGINS_OVERRIDE" ]; then
 fi
 CRONTAB_JOB="$CRONTAB_JOB $MONITOR_Q"
 
-crontab_append "$CRONTAB_JOB"
+# Keys cover both the current quoted form and the legacy unquoted form (older
+# start-monitor.sh versions wrote "... && $TOP/bin/monitor-hugegraph.sh"
+# without quoting), so an in-place upgrade detects an existing job as a
+# duplicate instead of installing a second one alongside it.
+crontab_append "$CRONTAB_JOB" "$MONITOR_Q" "$MONITOR_RAW"

@@ -76,6 +76,12 @@ LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_OVERRIDE")" || exit 1
 PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")" || exit 1
 PID_FILE_OVERRIDE="$(canonicalize_file "$PID_FILE_OVERRIDE")" || exit 1
 
+# Re-validate the *effective*, canonicalized plugins path: cd/pwd resolves a
+# relative override against the current working directory, which can
+# introduce a ':' (or other unsafe char) that wasn't present in the raw value
+# (e.g. launching from a directory such as "/tmp/work:one").
+reject_unsafe_path "$PLUGINS_OVERRIDE" "-o plugins dir (resolved)" classpath || exit 1
+
 # The monitor persists these values into a crontab line, where '%' is special to cron
 if [ "$OPEN_MONITOR" == "true" ]; then
     reject_unsafe_path "$CONF_OVERRIDE" "conf dir (-c)" cron || exit 1
@@ -121,9 +127,28 @@ reject_relative_conf_path "$GRAPHS_DIR" "graphs" "$CONF/rest-server.properties" 
 check_port "$GREMLIN_SERVER_URL"
 check_port "$REST_SERVER_URL"
 
-# Note: Only download hugegraph-server.keystore when we config https (check the conf file)
-if [[ $REST_SERVER_URL == https* && ! -e "${CONF}/hugegraph-server.keystore" ]]; then
-    download "${CONF}" "https://github.com/apache/hugegraph-doc/raw/binary-1.5/dist/server/hugegraph-server.keystore"
+# Note: Only check/download hugegraph-server.keystore when we config https.
+# 'ssl.keystore_file' (ServerOptions.SSL_KEYSTORE_FILE) defaults to the
+# relative 'conf/hugegraph-server.keystore' and, like 'graphs' above, is
+# opened by RestServer/Grizzly's SSLContextConfigurator relative to the
+# working directory ($TOP below), not relative to $CONF. So under -c this
+# must be rejected the same way, and the download must target the path the
+# JVM will actually open rather than unconditionally ${CONF}.
+if [[ $REST_SERVER_URL == https* ]]; then
+    KEYSTORE_FILE=$(read_property "$CONF/rest-server.properties" "ssl.keystore_file")
+    if [ -z "$KEYSTORE_FILE" ]; then
+        KEYSTORE_FILE="conf/hugegraph-server.keystore"
+    fi
+    reject_relative_conf_path "$KEYSTORE_FILE" "ssl.keystore_file" "$CONF/rest-server.properties" || exit 1
+
+    case "$KEYSTORE_FILE" in
+        /*) KEYSTORE_PATH="$KEYSTORE_FILE" ;;
+        *) KEYSTORE_PATH="$TOP/$KEYSTORE_FILE" ;;
+    esac
+
+    if [ ! -e "$KEYSTORE_PATH" ]; then
+        download "$(dirname "$KEYSTORE_PATH")" "https://github.com/apache/hugegraph-doc/raw/binary-1.5/dist/server/hugegraph-server.keystore"
+    fi
 fi
 
 if [ ! -d "$LOGS" ]; then

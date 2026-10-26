@@ -74,6 +74,12 @@ RESTART_LOGS_OVERRIDE="$(canonicalize_dir "$LOGS_ARG")" || exit 1
 RESTART_PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_ARG")" || exit 1
 RESTART_PID_FILE_OVERRIDE="$(canonicalize_file "$PID_ARG")" || exit 1
 
+# Re-validate the *effective*, canonicalized plugins path: cd/pwd resolves a
+# relative override against the current working directory, which can
+# introduce a ':' (or other unsafe char) that wasn't present in the raw value
+# (e.g. launching from a directory such as "/tmp/work:one").
+reject_unsafe_path "$RESTART_PLUGINS_OVERRIDE" "-o plugins dir (resolved)" classpath || exit 1
+
 RESTART_CONF="${RESTART_CONF_OVERRIDE:-$TOP/conf}"
 RESTART_LOGS="${RESTART_LOGS_OVERRIDE:-$TOP/logs}"
 RESTART_PLUGINS="${RESTART_PLUGINS_OVERRIDE:-$TOP/plugins}"

@@ -50,6 +50,12 @@ reject_unsafe_path "$PLUGINS_OVERRIDE" "-o plugins dir" classpath || exit 1
 CONF_OVERRIDE="$(canonicalize_dir "$CONF_OVERRIDE" nocreate)" || exit 1
 PLUGINS_OVERRIDE="$(canonicalize_dir "$PLUGINS_OVERRIDE")" || exit 1
 
+# Re-validate the *effective*, canonicalized plugins path: cd/pwd resolves a
+# relative override against the current working directory, which can
+# introduce a ':' (or other unsafe char) that wasn't present in the raw value
+# (e.g. launching from a directory such as "/tmp/work:one").
+reject_unsafe_path "$PLUGINS_OVERRIDE" "-o plugins dir (resolved)" classpath || exit 1
+
 CONF="${CONF_OVERRIDE:-$TOP/conf}"
 LIB="$TOP/lib"
 PLUGINS="${PLUGINS_OVERRIDE:-$TOP/plugins}"

@@ -30,10 +30,14 @@ TOP="$(cd "$BIN"/../ && pwd)"
 
 . "$BIN"/util.sh
 
-# Must equal the serialized form start-monitor.sh saved (one quoted shell word),
-# otherwise grep -F cannot match a path containing an apostrophe or space and the
-# job could never be removed. shell_quote (not cron_quote) so removal is not
-# blocked by validation.
-CRONTAB_JOB="$(shell_quote "$TOP/bin/monitor-hugegraph.sh")"
+# Must match the serialized form start-monitor.sh saves (one quoted shell word).
+# shell_quote (not cron_quote) so removal is not blocked by validation.
+MONITOR_RAW="$TOP/bin/monitor-hugegraph.sh"
+MONITOR_Q="$(shell_quote "$MONITOR_RAW")"
 
-crontab_remove "$CRONTAB_JOB"
+# Match both the current quoted form and the legacy unquoted form (older
+# start-monitor.sh versions wrote "... && $TOP/bin/monitor-hugegraph.sh"
+# without quoting). Otherwise a job installed before this quoting fix survives
+# an in-place upgrade: grep -F never matches it, removal silently no-ops, and
+# the stale cron entry can restart the server within a minute.
+crontab_remove "$MONITOR_Q" "$MONITOR_RAW"

@@ -189,33 +189,220 @@ function reject_relative_conf_path() {
     return 1
 }
 
-function crontab_append() {
-    local job="$1"
-    crontab -l 2>/dev/null | grep -F -- "$job" >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        return 1
+# Serialize concurrent cron edits (across both processes and scripts: start,
+# stop and restart can all touch the crontab around the same time). Uses
+# flock(1) when available; falls back to an atomic mkdir-based lock with a
+# stale-lock timeout on systems without flock (e.g. stock macOS).
+# NOTE: neither path is reentrant. A process that already holds this lock
+# must not call crontab_lock_acquire (directly, or via crontab_append /
+# crontab_remove) again before releasing it: flock(1) keys locks off the open
+# file description, not the pid, so a second acquire from the SAME process
+# blocks on itself for the full CRONTAB_LOCK_TIMEOUT_S and then fails.
+CRONTAB_LOCK_FILE="${TMPDIR:-/tmp}/.hugegraph-crontab.lock"
+CRONTAB_LOCK_FD=9
+CRONTAB_LOCK_TIMEOUT_S=30
+
+function crontab_lock_acquire() {
+    if command_available flock; then
+        eval "exec ${CRONTAB_LOCK_FD}>\"\$CRONTAB_LOCK_FILE\"" 2>/dev/null || return 1
+        if ! flock -w "$CRONTAB_LOCK_TIMEOUT_S" "$CRONTAB_LOCK_FD"; then
+            eval "exec ${CRONTAB_LOCK_FD}>&-" 2>/dev/null
+            echo "ERROR: timed out waiting for the crontab lock" >&2
+            return 1
+        fi
+        return 0
     fi
-    # printf, not echo: echo may interpret backslashes or swallow a leading -n/-e
-    { crontab -l 2>/dev/null; printf '%s\n' "$job"; } | crontab -
+    local lockdir="${CRONTAB_LOCK_FILE}.d" waited=0
+    while ! mkdir -- "$lockdir" 2>/dev/null; do
+        # If mtime can't be determined (stat lacks -c/-f, or the holder
+        # removed lockdir in the gap between our failed mkdir and this stat),
+        # do NOT assume epoch 0 / "infinitely old": that would make a
+        # perfectly live, just-created lock look stale and get stolen,
+        # Skip the staleness check instead and just retry after the sleep below.
+        local mtime
+        mtime=$(stat -c %Y "$lockdir" 2>/dev/null || stat -f %m "$lockdir" 2>/dev/null) || mtime=""
+        if [ -n "$mtime" ]; then
+            local age=$(( $(date +%s) - mtime ))
+            if [ "$age" -gt "$CRONTAB_LOCK_TIMEOUT_S" ]; then
+                rmdir -- "$lockdir" 2>/dev/null   # stale lock from a killed process
+                continue
+            fi
+        fi
+        sleep 1
+        waited=$((waited + 1))
+        if [ "$waited" -ge "$CRONTAB_LOCK_TIMEOUT_S" ]; then
+            echo "ERROR: timed out waiting for the crontab lock" >&2
+            return 1
+        fi
+    done
+    return 0
 }
 
-function crontab_remove() {
-    local job="$1"
-    # check exist before remove
-    crontab -l 2>/dev/null | grep -F -- "$job" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        return 0
-    fi
-
-    crontab -l 2>/dev/null | grep -Fv -- "$job" | crontab -
-
-    # Check exist after remove
-    crontab -l 2>/dev/null | grep -F -- "$job" >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        return 1
+function crontab_lock_release() {
+    if command_available flock; then
+        eval "exec ${CRONTAB_LOCK_FD}>&-" 2>/dev/null
     else
+        rmdir -- "${CRONTAB_LOCK_FILE}.d" 2>/dev/null
+    fi
+}
+
+# Print the current crontab to stdout. Returns 0 = table read (possibly
+# empty), 1 = user has no crontab (not an error), 2 = read failure.
+# A failure MUST NOT be confused with "empty": writing back an empty table
+# that was really a read error would destroy every job the user has.
+function crontab_list() {
+    local err out
+    err="$(mktemp -- "${TMPDIR:-/tmp}/cron-err.XXXXXX")" || return 2
+    out="$(mktemp -- "${TMPDIR:-/tmp}/cron-out.XXXXXX")" || { rm -f -- "$err"; return 2; }
+    chmod 600 -- "$err" "$out" 2>/dev/null
+    if crontab -l >"$out" 2>"$err"; then
+        cat -- "$out"
+        rm -f -- "$err" "$out"
         return 0
     fi
+    # "no crontab for <user>" on otherwise-empty stdout is simply an empty
+    # table, not a failure.
+    if [ ! -s "$out" ] && grep -qi 'no crontab' -- "$err"; then
+        rm -f -- "$err" "$out"
+        return 1
+    fi
+    echo "ERROR: cannot read the crontab: $(cat -- "$err")" >&2
+    rm -f -- "$err" "$out"
+    return 2
+}
+
+# crontab_append <line> [key ...]   keys default to <line>
+# 0 = installed.  1 = a key already present (nothing written).
+# 2 = crontab could not be read, locked or written.
+#
+# The crontab is kept in a temp FILE, not a shell variable, because command
+# substitution strips trailing newlines, which can silently desync line-count
+# reasoning. A trap guarantees the temp file and the lock are released even
+# if the script is interrupted (Ctrl-C) mid-edit.
+function crontab_append() {
+    local job="${1:-}"; shift || true
+    local keys=()
+    if [ $# -gt 0 ]; then keys=("$@"); else keys=("$job"); fi
+    local args=() k
+    for k in "${keys[@]}"; do args+=(-e "$k"); done
+
+    local table lock_held=0 prev_exit_trap
+    table="$(mktemp -- "${TMPDIR:-/tmp}/cron-cur.XXXXXX")" || return 2
+    chmod 600 -- "$table" 2>/dev/null
+    # RETURN is this call's own cleanup; EXIT is process-global, so save any
+    # trap the caller already had and chain it after ours. The handler clears
+    # both traps once it runs so it cannot fire again on a later, unrelated
+    # function return and reference locals that no longer exist.
+    prev_exit_trap="$(trap -p EXIT)"
+    trap '
+        rm -f -- "$table" 2>/dev/null
+        [ "$lock_held" -eq 1 ] && crontab_lock_release
+        trap - RETURN EXIT
+        eval "$prev_exit_trap"
+    ' RETURN EXIT
+
+    crontab_lock_acquire || return 2
+    lock_held=1
+
+    crontab_list >"$table"
+    local rc=$?
+    if [ "$rc" -eq 2 ]; then return 2; fi
+    [ "$rc" -eq 1 ] && : >"$table"   # no crontab yet: start from an empty file
+
+    if [ -s "$table" ] && grep -F "${args[@]}" -- "$table" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # printf, not echo: a line starting with -n/-e or containing backslashes
+    # must be written verbatim.
+    printf '%s\n' "$job" >>"$table" || return 2
+    if ! crontab -- "$table"; then
+        return 2
+    fi
+    return 0
+}
+
+# crontab_remove <key> [key ...]
+# Deletes every crontab line containing any key (matched literally, via
+# grep -F). Steps: lock -> read the table into a file -> if no key is present,
+# return early without writing -> filter out matching lines into a second
+# file -> install it with 'crontab' (or 'crontab -r' if nothing is left) ->
+# re-read the table and confirm no key remains.
+# 0 = removed, or nothing to remove to begin with.
+# 1 = failed before any write was attempted (table verifiably untouched).
+# 2 = a write was attempted but could not be confirmed (the install reported
+#     an error, or the post-write verify failed/still shows a key) - the
+#     caller should re-check manually rather than assume nothing happened.
+#
+# Same file-based read/filter/verify flow and the same interrupt-safe
+# trap/lock pattern as crontab_append.
+function crontab_remove() {
+    [ $# -eq 0 ] && return 0
+
+    local args=() k
+    for k in "$@"; do args+=(-e "$k"); done
+
+    local table kept lock_held=0 prev_exit_trap
+    table="$(mktemp -- "${TMPDIR:-/tmp}/cron-cur.XXXXXX")" || return 1
+    kept="$(mktemp -- "${TMPDIR:-/tmp}/cron-new.XXXXXX")" || { rm -f -- "$table"; return 1; }
+    chmod 600 -- "$table" "$kept" 2>/dev/null
+    prev_exit_trap="$(trap -p EXIT)"
+    trap '
+        rm -f -- "$table" "$kept" 2>/dev/null
+        [ "$lock_held" -eq 1 ] && crontab_lock_release
+        trap - RETURN EXIT
+        eval "$prev_exit_trap"
+    ' RETURN EXIT
+
+    crontab_lock_acquire || return 1
+    lock_held=1
+
+    crontab_list >"$table"
+    local rc=$?
+    [ "$rc" -eq 1 ] && return 0   # no crontab at all -> nothing to remove
+    [ "$rc" -ne 0 ] && return 1   # real read failure -> never write
+
+    if [ ! -s "$table" ] || ! grep -F "${args[@]}" -- "$table" >/dev/null 2>&1; then
+        return 0   # key not present -> nothing to remove
+    fi
+
+    grep -Fv "${args[@]}" -- "$table" >"$kept"
+    local grep_rc=$?
+    # 0 = some lines kept, 1 = all lines matched (an empty result is correct
+    # here), anything else is a grep failure and must not reach crontab. No
+    # write has happened yet, so this is still return 1.
+    if [ "$grep_rc" -gt 1 ]; then
+        echo "ERROR: failed to filter the crontab; leaving it unchanged" >&2
+        return 1
+    fi
+
+    # From here on a write is attempted: any failure past this point is a
+    # return 2 (unconfirmed), never a return 1 (table verifiably untouched).
+    if [ -s "$kept" ]; then
+        if ! crontab -- "$kept"; then
+            echo "ERROR: failed to install the new crontab; state unconfirmed" >&2
+            return 2
+        fi
+    else
+        # Removing the last line. Portable way to clear a table; 'crontab -'
+        # with empty stdin is implementation-defined.
+        crontab -r 2>/dev/null || true
+    fi
+
+    # Verify against a fresh read. The install above already happened, so any
+    # failure here can only report "unconfirmed", not "unchanged".
+    crontab_list >"$table"
+    rc=$?
+    [ "$rc" -eq 1 ] && return 0
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: could not verify the crontab after removal" >&2
+        return 2
+    fi
+    if [ -s "$table" ] && grep -F "${args[@]}" -- "$table" >/dev/null 2>&1; then
+        echo "ERROR: key still present in the crontab after removal" >&2
+        return 2
+    fi
+    return 0
 }
 
 # wait_for_startup friendly_name host port timeout_s
