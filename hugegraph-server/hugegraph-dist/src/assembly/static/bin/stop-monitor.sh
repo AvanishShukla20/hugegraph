@@ -40,4 +40,10 @@ MONITOR_Q="$(shell_quote "$MONITOR_RAW")"
 # without quoting). Otherwise a job installed before this quoting fix survives
 # an in-place upgrade: grep -F never matches it, removal silently no-ops, and
 # the stale cron entry can restart the server within a minute.
-crontab_remove "$MONITOR_Q" "$MONITOR_RAW"
+# The legacy key is anchored with the literal "&& " prefix (not just the bare
+# path): grep -F does substring matching, so an unanchored bare path would
+# also match as a SUBSTRING of a different install's longer path (e.g. the
+# key for /opt/hg matches a crontab line for /data/opt/hg), removing the
+# wrong install's job. Must stay in sync with start-monitor.sh's key.
+MONITOR_LEGACY_KEY="&& $MONITOR_RAW"
+crontab_remove "$MONITOR_Q" "$MONITOR_LEGACY_KEY"

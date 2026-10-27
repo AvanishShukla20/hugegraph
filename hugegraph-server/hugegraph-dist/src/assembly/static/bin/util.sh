@@ -430,13 +430,23 @@ function reject_relative_conf_path() {
 # crontab_remove) again before releasing it: flock(1) keys locks off the open
 # file description, not the pid, so a second acquire from the SAME process
 # blocks on itself for the full CRONTAB_LOCK_TIMEOUT_S and then fails.
-CRONTAB_LOCK_FILE="${TMPDIR:-/tmp}/.hugegraph-crontab.lock"
+# The lock file is keyed to the calling user's uid: a single shared name
+# under /tmp would be created and owned by whichever user got there first,
+# so every other account could then fail to open it (wrong owner, or a
+# hardened fs.protected_regular sysctl, which blocks even root) with no
+# obvious cause.
+CRONTAB_LOCK_FILE="${TMPDIR:-/tmp}/.hugegraph-crontab-$(id -u).lock"
 CRONTAB_LOCK_FD=9
 CRONTAB_LOCK_TIMEOUT_S=30
 
 function crontab_lock_acquire() {
     if command_available flock; then
-        eval "exec ${CRONTAB_LOCK_FD}>\"\$CRONTAB_LOCK_FILE\"" 2>/dev/null || return 1
+        local open_err
+        open_err="$(eval "exec ${CRONTAB_LOCK_FD}>\"\$CRONTAB_LOCK_FILE\"" 2>&1)"
+        if [ $? -ne 0 ]; then
+            echo "ERROR: cannot open crontab lock file '$CRONTAB_LOCK_FILE': $open_err" >&2
+            return 1
+        fi
         if ! flock -w "$CRONTAB_LOCK_TIMEOUT_S" "$CRONTAB_LOCK_FD"; then
             eval "exec ${CRONTAB_LOCK_FD}>&-" 2>/dev/null
             echo "ERROR: timed out waiting for the crontab lock" >&2

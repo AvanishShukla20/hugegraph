@@ -415,6 +415,65 @@ EOF
     grep -qF -- "$RTOP/bin/monitor-hugegraph.sh" "$CRON_FILE" \
         && bad "stop-monitor.sh left the legacy-format job in the crontab" \
         || ok "stop-monitor.sh removes a legacy-format job on upgrade"
+
+    # Regression: a shorter install's path must not be treated as "already
+    # installed"/"found" just because it is a literal SUBSTRING of a longer,
+    # unrelated install's path (e.g. /opt/hg vs /data/opt/hg). The legacy key
+    # must be anchored with "&& " so grep -F cannot cross a path boundary.
+    SHORT_TOP="$TMP/opt-hg-$CURRENT_MODULE"; mkdir -p "$SHORT_TOP/bin"
+    SHORT_TOP="$(cd -P "$SHORT_TOP" && pwd)"
+    cp "$SM" "$STOPM" "$UTIL" "$SHORT_TOP/bin/"
+    cat > "$SHORT_TOP/bin/monitor-hugegraph.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$SHORT_TOP/bin/monitor-hugegraph.sh"
+
+    # LONG_TOP is constructed so that $SHORT_TOP is a literal SUFFIX of
+    # $LONG_TOP: this guarantees "$SHORT_TOP/bin/monitor-hugegraph.sh" is a
+    # substring of "$LONG_TOP/bin/monitor-hugegraph.sh", reproducing the
+    # exact /opt/hg-inside-/data/opt/hg collision from the review.
+    LONG_TOP="$TMP/data-prefix-$CURRENT_MODULE$SHORT_TOP"; mkdir -p "$LONG_TOP/bin"
+    LONG_TOP="$(cd -P "$LONG_TOP" && pwd)"
+    cp "$SM" "$STOPM" "$UTIL" "$LONG_TOP/bin/"
+    cat > "$LONG_TOP/bin/monitor-hugegraph.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$LONG_TOP/bin/monitor-hugegraph.sh"
+
+    # Install the LONG path's job first (simulating it was already running).
+    : > "$CRON_FILE"
+    JAVA_HOME=/usr bash "$LONG_TOP/bin/start-monitor.sh" >/dev/null 2>&1
+    LONG_COUNT_AFTER_FIRST="$(wc -l < "$CRON_FILE")"
+
+    # Now install the SHORT path's job: its path is a substring of the long
+    # path's job line, so an unanchored key would wrongly call this a dup.
+    JAVA_HOME=/usr bash "$SHORT_TOP/bin/start-monitor.sh" >/dev/null 2>&1
+    [ "$(wc -l < "$CRON_FILE")" -eq $((LONG_COUNT_AFTER_FIRST + 1)) ] \
+        && ok "start-monitor.sh for a shorter path installs alongside a longer, unrelated path's job" \
+        || bad "start-monitor.sh wrongly treated the shorter path's job as a duplicate: $(cat "$CRON_FILE")"
+    grep -qF -- "$LONG_TOP/bin/monitor-hugegraph.sh" "$CRON_FILE" \
+        && ok "the longer path's job is still present" \
+        || bad "the longer path's job was lost"
+
+    # Verify presence/absence using the SAME anchored form start-monitor.sh
+    # actually writes ("&& 'quoted path'"), not the bare path: a bare-path
+    # grep -F is itself unanchored and would wrongly match as a substring of
+    # the LONG path's line (which legitimately contains the SHORT path as a
+    # suffix), producing a false "still present" here.
+    SHORT_ANCHORED="&& $(shell_quote "$SHORT_TOP/bin/monitor-hugegraph.sh")"
+    LONG_ANCHORED="&& $(shell_quote "$LONG_TOP/bin/monitor-hugegraph.sh")"
+
+    # stop-monitor.sh for the SHORT path must remove only its own job, not
+    # the longer, unrelated path's job.
+    bash "$SHORT_TOP/bin/stop-monitor.sh" >/dev/null 2>&1
+    grep -qF -- "$SHORT_ANCHORED" "$CRON_FILE" \
+        && bad "stop-monitor.sh left the shorter path's own job in place" \
+        || ok "stop-monitor.sh removed the shorter path's own job"
+    grep -qF -- "$LONG_ANCHORED" "$CRON_FILE" \
+        && ok "stop-monitor.sh for the shorter path did not remove the longer, unrelated path's job" \
+        || bad "stop-monitor.sh wrongly removed the longer path's unrelated job"
 fi
 : > "$CRON_FILE"
 
